@@ -1,0 +1,39 @@
+# Build output
+target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# Env / secrets
+.env
+.env.*.local
+*.pem
+*.p12
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Terraform
+infra/terraform/**/.terraform/
+infra/terraform/**/*.tfstate
+infra/terraform/**/*.tfstate.backup
+infra/terraform/**/.terraform.lock.hcl
+infra/terraform/**/*.tfvars
+!infra/terraform/**/*.tfvars.example
+
+# Test / coverage artifacts
+/testdata/tmp/
+coverage/
