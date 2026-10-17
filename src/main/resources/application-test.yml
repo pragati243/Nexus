@@ -1,0 +1,9 @@
+spring:
+  jpa:
+    show-sql: false
+
+logging:
+  level:
+    com.nexus: INFO
+    org.testcontainers: WARN
+    com.github.dockerjava: WARN

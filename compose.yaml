@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:-nexus}
+      POSTGRES_USER: ${DB_USERNAME:-nexus_app}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeit-local-only}
+    ports:
+      - "5432:5432"
+    volumes:
+      - nexus-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-nexus_app} -d ${DB_NAME:-nexus}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  nexus-postgres-data:

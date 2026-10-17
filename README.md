@@ -14,9 +14,11 @@ history.
 
 ## Status
 
-🚧 **Phase 0 — Architecture & engineering rules.** No application code has been
-written yet. See [docs/build-plan.md](docs/build-plan.md) for the phased plan
-and current phase gate.
+🚧 **Phase 1 — Project skeleton & local developer loop.** A running API
+skeleton exists (health/readiness/liveness probes, service metadata endpoint,
+global error handling, security foundation). No business modules yet. See
+[docs/build-plan.md](docs/build-plan.md) for the phased plan and current
+phase gate.
 
 ## Start here
 
@@ -46,9 +48,60 @@ and current phase gate.
 
 ## Local development
 
-Not yet available — Phase 1 will add `compose.yaml` (PostgreSQL + LocalStack for
-S3/SQS) and the first runnable API skeleton. This README will be updated with
-run instructions at that point.
+### Prerequisites
+
+- JDK 21 (any distribution — Temurin, Microsoft Build of OpenJDK, etc.). You
+  do **not** need Maven installed; this repo uses the Maven Wrapper, which
+  only needs a JDK on `JAVA_HOME`/`PATH` to bootstrap itself.
+- Docker (for the local PostgreSQL container and for Testcontainers-backed
+  tests).
+
+### Run the API locally
+
+```bash
+docker compose up -d                 # starts PostgreSQL on localhost:5432
+cp .env.example .env                 # edit if you changed compose defaults
+./mvnw spring-boot:run -Dspring-boot.run.profiles=local
+```
+
+Then:
+
+- `curl http://localhost:8080/actuator/health` → `{"status":"UP"}`
+- `curl http://localhost:8080/actuator/health/liveness` /
+  `.../readiness` → liveness/readiness probes
+- `curl http://localhost:8080/api/v1/system/info` → service metadata
+- Swagger UI: http://localhost:8080/swagger-ui.html
+
+### Run the worker locally
+
+The worker has no HTTP endpoints and no real behavior yet (messaging/SQS
+consumption lands in Phase 3) — it exists to prove the two-entry-point shape
+boots cleanly:
+
+```bash
+./mvnw spring-boot:run -Dspring-boot.run.main-class=com.nexus.NexusWorkerApplication -Dspring-boot.run.profiles=local
+```
+
+### Build and test
+
+```bash
+./mvnw verify
+```
+
+Runs unit tests plus Testcontainers-backed integration tests (spins up a real
+ephemeral PostgreSQL per test class — no shared/mocked database). Requires
+Docker to be running.
+
+### Build the container image
+
+```bash
+docker build -t nexus-api:local .
+docker run --rm -p 8080:8080 --env-file .env nexus-api:local
+```
+
+Only the API is containerized so far — see
+[docs/build-plan.md](docs/build-plan.md) Phase 1 notes for why the worker
+image is deferred.
 
 ## Repository layout
 
