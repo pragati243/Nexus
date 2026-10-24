@@ -92,9 +92,13 @@ original draft but are API/business-logic-shaped, not persistence:
 - `identity`/`security` JWT validation config and `TenantContext`
   resolution from `tenant_memberships`.
 - `POST /api/v1/integrations`, `GET /api/v1/integrations`.
-- The ArchUnit module-boundary/tenant-scoping rule — there's nothing yet for
-  it to meaningfully check without a service layer calling across modules;
-  it lands with Phase 3's first real cross-module call.
+- The ArchUnit module-boundary/tenant-scoping rule — Phase 3 ended up
+  introducing exactly one deliberate, documented cross-module exception
+  (`TenantIntegrationAccessGuard` reaching into `com.nexus.integration`'s
+  repository; see its Javadoc) rather than a clean boundary to enforce.
+  Writing the rule now would mean encoding that one exception on day one;
+  deferred to Phase 3b, which introduces enough real cross-module traffic
+  to calibrate a rule that isn't just "allow-list of one."
 
 **Acceptance criteria:**
 - [x] All 12 migrations apply cleanly on an empty database and `migrate()`
@@ -115,14 +119,70 @@ original draft but are API/business-logic-shaped, not persistence:
 ./mvnw -q verify   # runs Testcontainers-backed integration tests, incl. migrations
 ```
 
-## Phase 3 — Ingestion workflow (Workflow A)
+## Phase 3 — Identity, tenant membership & authorization ✅ this phase
 
 **Depends on:** Phase 2 (schema, entities, repositories).
+**Delivered** (carried forward from Phase 2's original, broader Phase 3
+draft — the ingestion workflow part of that draft is now its own phase,
+**Phase 3b** below, so this phase stayed focused on auth as explicitly
+scoped):
+- `com.nexus.security.OidcJwtDecoderConfig` — production JWT validation:
+  signature (JWK set), `exp`/`nbf`, `iss`, and a custom `aud` validator
+  (Spring ships none). Active whenever `local`/`test` are both inactive,
+  including no-profile-set.
+- `com.nexus.security.devauth` — the isolated local/test auth path: a
+  per-JVM ephemeral HMAC key (`DevJwtAuthConfig`), `TestTokenIssuer`, and a
+  `POST /api/v1/dev/tokens` convenience endpoint, all `@Profile({"local",
+  "test"})`-gated with an independent `@PostConstruct` guard against `prod`
+  also being active. No identity provider or credential invented.
+- `com.nexus.tenant.TenantContext` / `TenantContextResolver` /
+  `@CurrentTenant` argument resolver — tenant and role resolved server-side
+  from `tenant_memberships`, never from a client-supplied field. See
+  [docs/authorization-model.md](authorization-model.md).
+- `MembershipRole` ordered `READ_ONLY < OPERATOR < TENANT_ADMIN` with
+  `atLeast(...)`; `V13__rename_viewer_role_to_read_only.sql` (a documented
+  rename from Phase 0's draft naming, not a silent redesign).
+- `com.nexus.tenant.TenantIntegrationAccessGuard` — the background-
+  processing equivalent re-validation check, built and tested now even
+  though nothing calls it until Phase 3b's worker exists.
+- `POST`/`GET /api/v1/integrations`, `GET /api/v1/integrations/{id}` — the
+  vertical slice used to prove the whole model end to end over real HTTP.
+- CORS via `CORS_ALLOWED_ORIGINS`, empty/no-wildcard by default.
+- SLF4J-logged auth/authz outcomes (principal + path, never tokens/claims)
+  in `SecurityConfig`'s entry point / access-denied handler;
+  `audit_events` rows for authorized mutations (e.g. `INTEGRATION_CREATED`).
+**Acceptance criteria:**
+- [x] Missing credentials, a malformed bearer token, and an expired token
+      all reject with 401 (`AuthenticationIT`).
+- [x] A role below an action's minimum is rejected with 403
+      (`TenantAuthorizationIT`).
+- [x] Tenant A cannot read tenant B's integration by its real id — 404,
+      not 403, matching the existence-leak rule (`TenantAuthorizationIT`).
+- [x] A principal with zero memberships is 403 everywhere; a principal
+      with multiple memberships and no `X-Tenant-Id` is 400; the header
+      correctly selects among memberships when present and valid.
+- [x] The background-processing guard rejects a suspended tenant, a
+      disabled integration, and an integration claimed under the wrong
+      tenant (`TenantIntegrationAccessGuardIT`).
+- [ ] Not run this phase per explicit instruction — see the Phase 3
+      completion report for what's verified by inspection vs. by execution.
+**Deferred, explicitly out of this phase's scope** (see
+[authorization-model.md § 7](authorization-model.md#7-explicit-non-goals-for-this-phase)):
+tenant membership management endpoints, fine-grained per-resource
+permissions, the ArchUnit module-boundary rule (still nothing cross-module
+to meaningfully check), cursor-based pagination for the integrations list.
+**Test commands:**
+```
+./mvnw -q verify -Dtest=AuthenticationIT
+./mvnw -q verify -Dtest=TenantAuthorizationIT
+./mvnw -q verify -Dtest=TenantIntegrationAccessGuardIT
+```
+
+## Phase 3b — Ingestion workflow (Workflow A)
+
+**Depends on:** Phase 3 (auth/tenant context now exists to build real
+endpoints against).
 **Scope:**
-- Carried forward from the original Phase 2 plan (deferred — see Phase 2's
-  note above): `identity`/`security` JWT validation config,
-  `TenantContext` resolution from `tenant_memberships`,
-  `POST`/`GET /api/v1/integrations`, and the ArchUnit module-boundary rule.
 - `ingestion`, `normalization`, `processing`, `messaging`, `storage`
   modules.
 - `POST /api/v1/ingestions` (idempotency-key enforced), presigned S3 upload,
@@ -132,10 +192,14 @@ original draft but are API/business-logic-shaped, not persistence:
 - `nexus-worker`: SQS consumer, CSV parsing/normalization for one concrete
   schema, idempotent `source_records` upsert, `processing_attempts`
   recording, job status transitions per the state machine in
-  [architecture.md § 4](architecture.md#4-data-flow--workflow-a-import-customer-data).
+  [architecture.md § 4](architecture.md#4-data-flow--workflow-a-import-customer-data),
+  calling `TenantIntegrationAccessGuard.ensureActiveForProcessing(...)`
+  (built in Phase 3) before touching any message payload's claims.
 - DLQ wired up with `maxReceiveCount` redrive policy (LocalStack locally,
   real SQS later).
 - Scheduled sweep for abandoned `CREATED` jobs past TTL.
+- The ArchUnit module-boundary rule deferred from Phase 2/3 — this is the
+  first phase with real cross-module service calls for it to check.
 **Acceptance criteria:**
 - Chaos test: kill the worker process mid-batch, restart, redeliver the
   same SQS message — assert zero duplicate `source_records` rows and a
@@ -155,7 +219,7 @@ original draft but are API/business-logic-shaped, not persistence:
 
 ## Phase 4 — Reconciliation engine (Workflow B)
 
-**Depends on:** Phase 3 (`source_records` populated from at least two
+**Depends on:** Phase 3b (`source_records` populated from at least two
 integrations).
 **Scope:**
 - `reconciliation` module: business-key matching, amount-tolerance and

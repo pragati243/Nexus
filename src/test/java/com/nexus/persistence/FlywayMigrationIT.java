@@ -17,9 +17,10 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * Verifies the Phase 2 migrations as a set: correct count and order, clean
- * apply on an empty database, and idempotent on a second run — not just that
- * "the app happens to start."
+ * Verifies the migrations as a set: correct count and order, clean apply on
+ * an empty database, and idempotent on a second run — not just that "the
+ * app happens to start." Updated in Phase 3 to include V13 (the
+ * READ_ONLY role rename) alongside Phase 2's original twelve.
  */
 @Testcontainers
 @ActiveProfiles("test")
@@ -44,11 +45,11 @@ class FlywayMigrationIT {
     }
 
     @Test
-    void appliesExactlyTheTwelveDocumentedMigrationsInOrder() {
+    void appliesExactlyTheThirteenDocumentedMigrationsInOrder() {
         MigrationInfo[] applied = flyway.info().applied();
 
         assertThat(applied).extracting(m -> m.getVersion().toString())
-                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12");
+                .containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13");
         assertThat(applied).extracting(MigrationInfo::getDescription)
                 .containsExactly(
                         "create tenants",
@@ -62,7 +63,8 @@ class FlywayMigrationIT {
                         "create idempotency keys",
                         "create outbox events",
                         "create processing attempts",
-                        "create audit events");
+                        "create audit events",
+                        "rename viewer role to read only");
     }
 
     @Test

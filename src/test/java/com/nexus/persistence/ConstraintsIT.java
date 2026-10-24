@@ -92,7 +92,7 @@ class ConstraintsIT {
         tenantMembershipRepository.saveAndFlush(
                 new TenantMembership(UUID.randomUUID(), tenant.getId(), "user-1", com.nexus.tenant.MembershipRole.OPERATOR));
         TenantMembership duplicate = new TenantMembership(
-                UUID.randomUUID(), tenant.getId(), "user-1", com.nexus.tenant.MembershipRole.VIEWER);
+                UUID.randomUUID(), tenant.getId(), "user-1", com.nexus.tenant.MembershipRole.READ_ONLY);
 
         assertThatThrownBy(() -> tenantMembershipRepository.saveAndFlush(duplicate))
                 .isInstanceOf(DataIntegrityViolationException.class);

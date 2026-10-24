@@ -10,7 +10,8 @@ auth, data handling, or external input.
 
 | Threat | Why it matters here | Mitigation |
 |---|---|---|
-| Forged or expired JWT accepted | Full account/tenant takeover | Spring Security OIDC resource server validates signature against the issuer's live JWK set (`OIDC_JWK_SET_URI`), checks `exp`/`nbf`/`iss`/`aud`. No custom JWT parsing. |
+| Forged or expired JWT accepted | Full account/tenant takeover | Spring Security OIDC resource server validates signature against the issuer's live JWK set (`OIDC_JWK_SET_URI`), checks `exp`/`nbf` (`JwtTimestampValidator`), `iss` (`JwtIssuerValidator`), and `aud` (custom validator — Spring ships none; see `com.nexus.security.OidcJwtDecoderConfig`). No custom JWT parsing. Implemented Phase 3; see [docs/authorization-model.md § 3](authorization-model.md#3-authentication-production-vs-localtest). |
+| Local/test auth bypass reachable in production | Would make every tenant trivially impersonable | `com.nexus.security.devauth.DevJwtAuthConfig` (ephemeral per-JVM HMAC key, no real IdP) is `@Profile({"local","test"})`-gated — the beans don't exist otherwise — plus a `@PostConstruct` check that fails startup if `prod` is *also* active. Two independent controls, not one. |
 | Token replay after logout/revocation | Stale session used after a user is offboarded | Short-lived access tokens (issuer-controlled, not Nexus-issued); Nexus does not implement its own session store, so revocation is the IdP's responsibility — documented as a dependency, not solved twice. |
 | Service-to-service calls (worker → nothing external-facing) | Worker has no inbound listener at all, so this class of threat is architecturally removed rather than mitigated by a control (see [architecture.md § 7](architecture.md#7-deployment-topology)). | N/A by design |
 
@@ -18,7 +19,7 @@ auth, data handling, or external input.
 
 | Threat | Why it matters here | Mitigation |
 |---|---|---|
-| Client-supplied `tenantId` used as authorization proof | This is the single most damaging possible bug in a multi-tenant reconciliation platform — one tenant reading another's financial discrepancies | `TenantContext` is derived server-side from `tenant_memberships` keyed on the JWT `sub`. An `X-Tenant-Id` header is treated as a *request to filter*, verified against actual memberships, never trusted at face value (see [api/initial-contract.md](api/initial-contract.md) and [CLAUDE.md](../CLAUDE.md) rule 2). |
+| Client-supplied `tenantId` used as authorization proof | This is the single most damaging possible bug in a multi-tenant reconciliation platform — one tenant reading another's financial discrepancies | `TenantContext` is derived server-side by `TenantContextResolver` from `tenant_memberships` keyed on the JWT `sub`, injected into controllers only via `@CurrentTenant` (no other constructor exists outside tests). An `X-Tenant-Id` header is treated as a *request to filter*, verified against actual memberships, never trusted at face value — implemented and tested in `TenantAuthorizationIT` (see [api/initial-contract.md](api/initial-contract.md), [authorization-model.md § 4](authorization-model.md#4-tenant-resolution-algorithm), and [CLAUDE.md](../CLAUDE.md) rule 2). |
 | IDOR via sequential/guessable resource IDs | An operator incrementing a job/discrepancy ID to probe other tenants' data | All primary keys are `uuid` (v4/v7), not sequential integers; every lookup-by-id query is additionally filtered by the caller's resolved `tenant_id`, so a correct-but-foreign UUID still returns `404`, not the record. |
 | Existence leak across tenants (403 vs 404) | A `403` on someone else's resource confirms it exists; over many probes this maps out another tenant's data volume | Any resource outside the caller's tenant returns `404`, identical to a non-existent resource (see [api/initial-contract.md § 1](api/initial-contract.md#standard-error-schema)). |
 | Worker processes a message for a tenant suspended after the message was enqueued | A message can sit in SQS across a tenant/integration being disabled | Worker re-validates `integrations.status = ACTIVE` and `tenants.status = ACTIVE` immediately before processing, not just at enqueue time (see [architecture.md § 8, point 4](architecture.md#8-trust-boundaries)). |
@@ -90,3 +91,57 @@ auth, data handling, or external input.
   default; CMK is a plausible enterprise-tier addition, not a v1 requirement.
 - Formal penetration test — this threat model is a design-time review, not a
   substitute for one.
+
+## 11. Phase 3 update — identity, tenant membership, authorization
+
+Re-reviewed because this phase touched auth directly, per this document's
+own header ("re-reviewed at the end of each phase that touches auth, data
+handling, or external input").
+Sections 1 and 2 above were updated in place to describe what's actually
+built rather than what was planned; this section records the assumptions
+made along the way and what's still open.
+
+### Assumptions made explicit
+
+- **The JWT carries no role or tenant claims.** Nexus roles are per-tenant
+  (`tenant_memberships.role`), not identity-provider-wide, so they can't
+  live in a token issued by a shared IdP across all of a customer's
+  internal tools. This is why role checks are plain Java
+  (`TenantContext.require(...)`) against a DB-resolved role, never
+  `@PreAuthorize("hasRole(...))` against JWT-derived authorities — see
+  [authorization-model.md § 1](authorization-model.md#1-two-separate-questions-two-separate-mechanisms).
+  If a future requirement needs IdP-asserted roles/groups (e.g. SSO group
+  sync), that's a deliberate new design decision, not an extension of this
+  one.
+- **`X-Tenant-Id` mismatches are 403, not 404.** Unlike a resource-id
+  lookup, the tenant id in the header came from the caller themselves —
+  there's no existence fact being newly revealed by a 403 here. Documented
+  explicitly in [authorization-model.md § 4](authorization-model.md#4-tenant-resolution-algorithm)
+  so this isn't mistaken for an inconsistency with the 404-for-resources
+  rule in § 2 above.
+- **Audit logging of auth outcomes is structured SLF4J logs, not
+  `audit_events` rows.** `AuditEventRecorder` requires an existing
+  transaction (`Propagation.MANDATORY`) and a resolved tenant id — neither
+  exists yet when authentication itself fails (there's no tenant to
+  attribute the row to, and no transaction has started). Authentication/
+  authorization *failures* are logged via SLF4J in `SecurityConfig`'s entry
+  point and access-denied handler (principal id and path only — never the
+  token or full claim set); successful *authorized actions* (e.g.
+  `POST /api/v1/integrations`) do write a proper `audit_events` row, since
+  a tenant and transaction genuinely exist by then.
+- **The dev token endpoint accepts any subject with zero credential
+  check.** This is intentional and is the entire isolation story's point of
+  leverage — see § above and `DevJwtAuthConfig`'s Javadoc. It is exactly as
+  dangerous as a feature that mints valid credentials for anyone should
+  sound, which is why both independent guards (profile gate +
+  `@PostConstruct` check) exist rather than one.
+
+### Residual risks, not yet closed
+
+| Risk | Why it's residual | Planned closure |
+|---|---|---|
+| No tenant membership management API | `tenant_memberships` rows can currently only be created by direct DB/test access, not through the product itself | A real "invite member" / "change role" endpoint, itself `TENANT_ADMIN`-gated, is unbuilt — tracked as follow-up work, not silently dropped |
+| No token revocation story beyond short expiry | A compromised access token is valid until it naturally expires; Nexus has no session store to force early invalidation | Explicitly the identity provider's responsibility (see § 1) — acceptable as long as access-token TTLs issued by the real IdP are kept short, which is a provider-side configuration choice outside this codebase |
+| `TenantIntegrationAccessGuard` exists and is tested, but nothing calls it yet | The worker/messaging code that would actually invoke it per real queue message doesn't exist until Phase 4 | Tracked in docs/build-plan.md; the check itself is verified in isolation now (`TenantIntegrationAccessGuardIT`) specifically so Phase 4 wires it in rather than re-deriving it |
+| CORS defaults to no origins anywhere, including a real frontend's eventual origin | No frontend exists yet to need one | `CORS_ALLOWED_ORIGINS` is a per-environment property for exactly this reason — set it when a real frontend origin exists, never widen it speculatively |
+| Rate limiting (429 is documented in the API contract) is not implemented | No abuse-prevention layer exists yet at any tier | Deferred; not a Phase 3 concern, noted so the `429` row in docs/api/initial-contract.md isn't mistaken for already-true |

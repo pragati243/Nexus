@@ -1,5 +1,8 @@
 package com.nexus.api;
 
+import com.nexus.shared.ResourceNotFoundException;
+import com.nexus.tenant.AmbiguousTenantSelectionException;
+import com.nexus.tenant.TenantAccessDeniedException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,6 +29,32 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    @ExceptionHandler(ResourceNotFoundException.class)
+    public ResponseEntity<Object> handleNotFound(ResourceNotFoundException ex, WebRequest request) {
+        ProblemDetail problemDetail = ProblemDetailFactory.create(
+                HttpStatus.NOT_FOUND, "Not Found", ex.getMessage(),
+                ProblemDetailFactory.codeFor(HttpStatus.NOT_FOUND), servletRequestOf(request));
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(problemDetail);
+    }
+
+    @ExceptionHandler(TenantAccessDeniedException.class)
+    public ResponseEntity<Object> handleTenantAccessDenied(TenantAccessDeniedException ex, WebRequest request) {
+        log.warn("Tenant authorization denied: {} [path={}]", ex.getMessage(),
+                servletRequestOf(request) != null ? servletRequestOf(request).getRequestURI() : "unknown");
+        ProblemDetail problemDetail = ProblemDetailFactory.create(
+                HttpStatus.FORBIDDEN, "Forbidden", ex.getMessage(),
+                ProblemDetailFactory.codeFor(HttpStatus.FORBIDDEN), servletRequestOf(request));
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(problemDetail);
+    }
+
+    @ExceptionHandler(AmbiguousTenantSelectionException.class)
+    public ResponseEntity<Object> handleAmbiguousTenant(AmbiguousTenantSelectionException ex, WebRequest request) {
+        ProblemDetail problemDetail = ProblemDetailFactory.create(
+                HttpStatus.BAD_REQUEST, "Bad Request", ex.getMessage(),
+                "AMBIGUOUS_TENANT_SELECTION", servletRequestOf(request));
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(problemDetail);
+    }
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<Object> handleUnexpected(Exception ex, WebRequest request) {

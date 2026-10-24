@@ -13,6 +13,7 @@ old one.
 | [0004](adr/0004-database-access-strategy.md) | Spring Data JPA plus targeted JDBC, not a pure-JPA or pure-JDBC approach | Accepted |
 | [0005](adr/0005-ecs-fargate-vs-kubernetes.md) | ECS Fargate, not Kubernetes (EKS), for container orchestration | Accepted |
 | [0006](adr/0006-spring-boot-4-vs-3.md) | Spring Boot 4.1.x, not 3.x, as the target framework version | Accepted |
+| [0007](adr/0007-explicit-tenant-authorization-not-method-security.md) | Explicit `TenantContext` role checks, not `@PreAuthorize`/method security | Accepted |
 
 ## How to write a new ADR
 

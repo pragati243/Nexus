@@ -2,6 +2,14 @@ spring:
   jpa:
     show-sql: true
 
+nexus:
+  security:
+    cors:
+      # Local-only convenience default for a frontend dev server — not used
+      # unless CORS_ALLOWED_ORIGINS is left unset locally. Never carried into
+      # application-prod.yml.
+      allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:5173}
+
 management:
   endpoint:
     health:

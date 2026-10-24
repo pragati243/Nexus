@@ -62,7 +62,7 @@ is the source of truth for tenant access.**
 | `id` | `uuid` PK | |
 | `tenant_id` | `uuid` NOT NULL FK → `tenants.id` | |
 | `principal_id` | `text` NOT NULL | subject claim from the OIDC token |
-| `role` | `text` NOT NULL | `TENANT_ADMIN`, `OPERATOR`, `VIEWER` |
+| `role` | `text` NOT NULL | `TENANT_ADMIN`, `OPERATOR`, `READ_ONLY` — renamed from `VIEWER` in Phase 3 (`V13__rename_viewer_role_to_read_only.sql`); see [docs/authorization-model.md](authorization-model.md) |
 | `created_at` | `timestamptz` NOT NULL DEFAULT now() | |
 
 **Constraints:** `UNIQUE (tenant_id, principal_id)` — one membership row per
@@ -498,6 +498,7 @@ intent as the original draft, more effective implementation.
 | V10 | `V10__create_outbox_events.sql` | `outbox_events` |
 | V11 | `V11__create_processing_attempts.sql` | `processing_attempts` |
 | V12 | `V12__create_audit_events.sql` | `audit_events` |
+| V13 | `V13__rename_viewer_role_to_read_only.sql` | `tenant_memberships` (Phase 3 — see § 7.1-equivalent note at the top of § 2 `tenant_memberships`) |
 
 Verified with Testcontainers PostgreSQL 17 (`src/test/java/com/nexus/persistence/`):
 

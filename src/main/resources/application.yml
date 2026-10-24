@@ -16,8 +16,16 @@ spring:
       resourceserver:
         jwt:
           jwk-set-uri: ${OIDC_JWK_SET_URI:https://changeme.example.com/.well-known/jwks.json}
+          issuer-uri: ${OIDC_ISSUER_URI:https://changeme.example.com/}
   lifecycle:
     timeout-per-shutdown-phase: 30s
+
+nexus:
+  security:
+    oidc:
+      audience: ${OIDC_AUDIENCE:https://changeme.example.com/api}
+    cors:
+      allowed-origins: ${CORS_ALLOWED_ORIGINS:}
 
 server:
   shutdown: graceful
