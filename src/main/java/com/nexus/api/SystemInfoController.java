@@ -19,7 +19,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/v1/system")
 @Tag(name = "System", description = "Service metadata")
-public class SystemInfoController {
+public class SystemInfoController {  
 
     private final BuildProperties buildProperties;
     private final Environment environment;

@@ -14,9 +14,12 @@ history.
 
 ## Status
 
-🚧 **Phase 1 — Project skeleton & local developer loop.** A running API
-skeleton exists (health/readiness/liveness probes, service metadata endpoint,
-global error handling, security foundation). No business modules yet. See
+🚧 **Phase 2 — Core schema & persistence.** All 12 tables exist as Flyway
+migrations with real PostgreSQL constraints, JPA entities, and repositories;
+verified against a real Testcontainers-backed PostgreSQL 17 instance (schema
+migration, constraint, FK-consistency, optimistic-locking, and transaction
+rollback tests). No business/API logic on top of it yet — no auth-derived
+`TenantContext`, no ingestion or reconciliation workflows. See
 [docs/build-plan.md](docs/build-plan.md) for the phased plan and current
 phase gate.
 

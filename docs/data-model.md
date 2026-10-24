@@ -1,11 +1,16 @@
 # Nexus — Data Model
 
-Status: Phase 0 draft. Columns and indexes may be refined during
-implementation, but the relationships and invariants listed here must be
-preserved — they are the acceptance criteria for the Phase 2 migrations.
+Status: **Phase 2 implemented.** All 12 tables below exist as Flyway
+migrations `V1`–`V12` in `src/main/resources/db/migration`, verified against
+a real PostgreSQL 17 instance via Testcontainers (see § 7). The column
+tables below are updated to match what was actually built; § 7 documents
+every place the implementation deviated from the original Phase 0 draft and
+why.
 
 All tables live in PostgreSQL, managed exclusively through Flyway migrations
-in `src/main/resources/db/migration`. No `ddl-auto` in any non-test profile.
+in `src/main/resources/db/migration`. `spring.jpa.hibernate.ddl-auto` is
+`validate` in every profile (including tests) — Hibernate never creates or
+alters schema; Flyway is the only writer of DDL.
 
 ## 1. Entity-relationship overview
 
@@ -128,6 +133,7 @@ every reconciliation run reads from.
 | `source_system` | `text` NOT NULL | denormalized from `integrations.source_system` for fast comparison queries |
 | `business_key` | `text` NOT NULL | the stable identifier reconciliation matches on (e.g. order number) |
 | `payload` | `jsonb` NOT NULL | normalized record fields |
+| `external_record_id` | `text` NOT NULL | **added in Phase 2** — the Phase 0 column list omitted this even though the invariant text below always required it to exist; see § 7.1 |
 | `amount` | `numeric(18,2)` NULL | hoisted out of `payload` for indexed comparison |
 | `record_timestamp` | `timestamptz` NULL | normalized to UTC; original offset kept in `payload` |
 | `created_at` / `updated_at` | `timestamptz` NOT NULL | |
@@ -270,6 +276,7 @@ Worker attempt history — one row per consume attempt, successful or not.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `uuid` PK | |
+| `tenant_id` | `uuid` NOT NULL FK → `tenants.id` | **added in Phase 2** — this table's own "Tenant ownership summary" (§ 3) already called it "tenant-tagged for safe filtering"; the column list just hadn't caught up. See § 7.1. |
 | `ingestion_job_id` | `uuid` NOT NULL FK → `ingestion_jobs.id` | |
 | `sqs_message_id` | `text` NOT NULL | |
 | `attempt_number` | `int` NOT NULL | |
@@ -359,3 +366,149 @@ not by Postgres native partition expiry in v1 — partitioning by time is a
 candidate optimization if `outbox_events` or `processing_attempts` volume
 makes DELETE-based cleanup too slow, deferred until there's a measured reason
 (see [build-plan.md](build-plan.md) Phase 6).
+
+## 7. Phase 2 implementation notes
+
+### 7.1 Deviations from the Phase 0 column lists, and why
+
+Two columns were added that weren't in the original per-table tables above.
+Both are explained here rather than changed silently, per the Phase 2
+instruction to explain any deviation before making it:
+
+- **`source_records.external_record_id`** — the Phase 0 invariant text for
+  this table always required a
+  `UNIQUE (tenant_id, integration_id, source_system, external_record_id)`
+  constraint (the whole idempotent-upsert guarantee for redelivered SQS
+  messages depends on it), but the summary column table never listed the
+  column itself. This was a gap in the original draft, not a design change
+  — the column had to exist for the invariant to be implementable at all.
+- **`processing_attempts.tenant_id`** — § 3 ("Tenant ownership summary") of
+  this document already asserted that `processing_attempts` is
+  "tenant-tagged for safe filtering," but the table's own column list never
+  included `tenant_id`. Added to make that existing claim true, and to give
+  `processing_attempts` the same composite-FK tenant-consistency enforcement
+  (§ 7.2) as every other child table.
+
+### 7.2 Composite foreign keys: how cross-tenant consistency is actually enforced
+
+The Phase 0 draft flagged, as an open assumption, *how* "an ingestion job
+belongs to the tenant and integration it processes" (Invariant #2) would be
+enforced — a composite FK, or a trigger. Phase 2 resolves this with composite
+foreign keys everywhere a child table references a parent that itself
+belongs to a tenant, applied as one consistent pattern across the whole
+schema rather than a one-off for `ingestion_jobs`:
+
+- `integrations` carries `UNIQUE (id, tenant_id)` so children can reference
+  `(parent_id, tenant_id)` as a pair.
+- `ingestion_jobs` carries both `UNIQUE (id, tenant_id)` **and**
+  `UNIQUE (id, tenant_id, integration_id)` — two different composite FKs
+  from two different children need two different column counts; Postgres
+  requires an exact match between a FK's referenced columns and some unique
+  constraint, not a subset of a wider one.
+- `reconciliation_runs` and `discrepancies` each carry `UNIQUE (id, tenant_id)`
+  for the same reason.
+
+Concretely: `ingestion_jobs (integration_id, tenant_id)` has a
+`FOREIGN KEY ... REFERENCES integrations (id, tenant_id)`. If application
+code ever tried to create an ingestion job claiming tenant A while pointing
+at an integration that actually belongs to tenant B, Postgres rejects the
+`INSERT` outright — this is tested directly in `ConstraintsIT` (see § 8) by
+attempting exactly that and asserting it fails, without relying on any
+Java-level check having been written correctly.
+
+### 7.3 JPA mapping: foreign keys are plain `UUID` columns, not `@ManyToOne`
+
+No entity in this codebase maps a foreign key as a JPA object association.
+`IngestionJob.tenantId`/`integrationId`, `SourceRecord.tenantId`/etc. are all
+plain `UUID` fields. This was a deliberate choice, not an oversight:
+
+- `@ManyToOne` defaults to `FetchType.EAGER` in JPA — every call site would
+  need to remember to override it, and one that forgets silently reintroduces
+  an N+1 or an unbounded fetch chain (exactly what the Phase 2 instructions
+  warn against).
+- A plain `UUID` column cannot be accidentally fetched. A caller that
+  genuinely needs the parent row looks it up explicitly through that
+  module's own repository — the dependency is visible at the call site
+  instead of hidden behind a lazy proxy.
+- The FK still exists and is still enforced — at the database level (§ 7.2),
+  which is what actually matters for correctness. The JPA layer not modeling
+  it as an object graph doesn't weaken the invariant at all.
+
+### 7.4 JSON columns are mapped as opaque `String`, not `Map`
+
+Every `jsonb` column (`integrations.config`, `source_records.payload`,
+`reconciliation_runs.tolerance_config`, `discrepancies.explanation`,
+`idempotency_keys.response_body`, `outbox_events.payload`,
+`audit_events.metadata`) is mapped as a Java `String` with
+`@JdbcTypeCode(SqlTypes.JSON)`, not as a `Map<String, Object>`. Hibernate
+then binds the string directly to the `jsonb` column with no
+serialize/deserialize step on the Java side, which sidesteps a real open
+question for this stack: Spring Boot 4 defaults to Jackson 3
+(`tools.jackson.*`), and Hibernate's `Map`-based JSON mapping would need a
+`FormatMapper` whose Jackson-version compatibility hasn't been verified yet.
+Business modules that need structured access to these payloads (Phase 3+)
+can introduce typed mapping once that verification is actually done, rather
+than guessing now.
+
+### 7.5 Enum columns: `CHECK` constraints for closed sets, plain `text` for open ones
+
+Every closed, small, state-machine-shaped column
+(`tenants.status`, `tenant_memberships.role`, `integrations.connection_type`,
+`integrations.status`, `ingestion_jobs.status`, `reconciliation_runs.status`,
+`discrepancies.reason`, `discrepancies.status`, `discrepancy_events.event_type`,
+`processing_attempts.outcome`) has a `CHECK (col IN (...))` constraint in its
+migration, matched to a Java enum with `@Enumerated(EnumType.STRING)`. This
+is enforced by Postgres regardless of what Java code does —
+`ConstraintsIT.databaseLevelCheckConstraintRejectsAnInvalidStatusEvenBypassingJavaEnumSafety`
+proves this by inserting an invalid value through raw JDBC, bypassing the
+Java enum entirely.
+
+Three columns are deliberately **not** `CHECK`-constrained despite looking
+similar: `idempotency_keys.scope`, `outbox_events.aggregate_type`, and
+`audit_events.action`. These are open, extensible category strings — new
+values are added as the system grows (a new idempotent operation, a new
+aggregate type, a new audit action) without needing a schema migration each
+time. Constraining them would trade real extensibility for a marginal safety
+net on a set that was never meant to be closed.
+
+### 7.6 One outbox index refinement
+
+The Phase 0 draft described the outbox poll index as `(published_at) WHERE
+published_at IS NULL`. Implemented instead as
+`CREATE INDEX ... ON outbox_events (created_at) WHERE published_at IS
+NULL` — every row inside a `WHERE published_at IS NULL` partial index
+already has the same (`NULL`) value for `published_at`, so indexing that
+column contributes nothing; indexing `created_at` is what actually makes
+the Outbox Publisher's "oldest unpublished first" poll query fast. Same
+intent as the original draft, more effective implementation.
+
+## 8. Phase 2 migrations and tests (as built)
+
+| # | File | Table |
+|---|---|---|
+| V1 | `V1__create_tenants.sql` | `tenants` |
+| V2 | `V2__create_tenant_memberships.sql` | `tenant_memberships` |
+| V3 | `V3__create_integrations.sql` | `integrations` |
+| V4 | `V4__create_ingestion_jobs.sql` | `ingestion_jobs` |
+| V5 | `V5__create_source_records.sql` | `source_records` |
+| V6 | `V6__create_reconciliation_runs.sql` | `reconciliation_runs` |
+| V7 | `V7__create_discrepancies.sql` | `discrepancies` |
+| V8 | `V8__create_discrepancy_events.sql` | `discrepancy_events` |
+| V9 | `V9__create_idempotency_keys.sql` | `idempotency_keys` |
+| V10 | `V10__create_outbox_events.sql` | `outbox_events` |
+| V11 | `V11__create_processing_attempts.sql` | `processing_attempts` |
+| V12 | `V12__create_audit_events.sql` | `audit_events` |
+
+Verified with Testcontainers PostgreSQL 17 (`src/test/java/com/nexus/persistence/`):
+
+| Test class | Covers |
+|---|---|
+| `FlywayMigrationIT` | All 12 migrations apply in order; re-running `migrate()` is a no-op; confirms the test is actually talking to PostgreSQL, not a fallback |
+| `ConstraintsIT` | Unique constraints (tenant slug, membership, idempotency key, source record external id), the cross-tenant composite FK rejection, the `reconciliation_runs` self-comparison `CHECK`, FK `RESTRICT` on deleting a tenant with children, and a raw-SQL proof that status `CHECK` constraints hold independent of Java |
+| `OptimisticLockingIT` | `@Version`-based rejection of a stale concurrent update on `ingestion_jobs`, simulated as two separate committed transactions |
+| `TransactionalPersistenceServicesIT` | `AuditEventRecorder`/`OutboxEventWriter` refuse to run outside an existing transaction (`Propagation.MANDATORY`); a forced failure inside a transaction rolls back **both** the business row and the audit row, verified from a separate later transaction; `IdempotencyKeyService` double-write rejection |
+
+No H2 or any other in-memory database is a dependency of this project —
+there is no driver on the classpath that Spring Boot could silently fall
+back to, so every one of these tests is necessarily exercising real
+PostgreSQL constraint/transaction behavior.

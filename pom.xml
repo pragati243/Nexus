@@ -55,6 +55,16 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- Spring Boot 4 split autoconfiguration into per-library modules; the generic
+             spring-boot-starter-data-jpa no longer pulls Flyway's autoconfiguration in
+             transitively (verified by its absence from every Boot 4.1.1 jar — see
+             docs/adr/0006-spring-boot-4-vs-3.md for the pattern of re-verifying rather than
+             assuming 3.x-era wiring still applies). This module is what actually runs Flyway
+             migrations at startup; flyway-core/flyway-database-postgresql alone do not. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-flyway</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-core</artifactId>

@@ -72,39 +72,57 @@ migrations beyond a placeholder, no real auth (health endpoint only).
 
 **Depends on:** Phase 1.
 **Scope:**
-- Flyway migrations for all tables in [data-model.md](data-model.md):
-  `tenants, tenant_memberships, integrations, ingestion_jobs,
-  source_records, reconciliation_runs, discrepancies, discrepancy_events,
-  idempotency_keys, outbox_events, processing_attempts, audit_events`,
-  with every constraint/index listed in that doc.
-- JPA entities + Spring Data repositories for the above, split by module.
-- `identity`/`tenant`/`security` modules: JWT validation config,
-  `TenantContext` resolution from `tenant_memberships`.
-- ArchUnit rule: no module accesses another module's `@Repository`
-  directly; every tenant-owned entity's repository methods include
-  `tenantId`/`TenantContext` in their signature.
-- `POST /api/v1/integrations`, `GET /api/v1/integrations` fully implemented
-  and tenant-scoped (first vertical slice, end to end through real auth).
+**Delivered** (narrower than this section originally planned — see note
+below):
+- Flyway migrations `V1`–`V12` for all 12 tables in
+  [data-model.md](data-model.md), with every constraint/index from that doc
+  plus the composite-FK tenant-consistency pattern resolved (see
+  [data-model.md § 7](data-model.md#7-phase-2-implementation-notes)).
+- JPA entities + Spring Data repositories for all 12 tables, split by
+  owning module, FKs as plain `UUID` columns (not `@ManyToOne`).
+- Three narrowly-scoped, `@Transactional`-enforced persistence services:
+  `IdempotencyKeyService`, `AuditEventRecorder`, `OutboxEventWriter`.
+- Testcontainers PostgreSQL suite: migrations, constraints, cross-tenant FK
+  rejection, optimistic locking, and real multi-row transaction rollback
+  (`src/test/java/com/nexus/persistence/`).
+
+**Deferred to Phase 3**, per this round's explicit instruction not to build
+ingestion/reconciliation business logic yet — these were in this section's
+original draft but are API/business-logic-shaped, not persistence:
+- `identity`/`security` JWT validation config and `TenantContext`
+  resolution from `tenant_memberships`.
+- `POST /api/v1/integrations`, `GET /api/v1/integrations`.
+- The ArchUnit module-boundary/tenant-scoping rule — there's nothing yet for
+  it to meaningfully check without a service layer calling across modules;
+  it lands with Phase 3's first real cross-module call.
+
 **Acceptance criteria:**
-- Testcontainers-based integration test proves: a request with tenant A's
-  token cannot read/see tenant B's integration, even when given tenant B's
-  real UUID (404, not 403 — see [threat-model.md § 2](threat-model.md#2-tenant-isolation-the-highest-priority-threat-class-in-this-system)).
-- `flyway:migrate` runs clean on an empty DB and is idempotent on a second
-  run.
-- ArchUnit suite passes and demonstrably fails if a test repository method
-  without tenant scoping is temporarily introduced (proves the rule is
-  real, not decorative).
+- [x] All 12 migrations apply cleanly on an empty database and `migrate()`
+      is a no-op on a second run (`FlywayMigrationIT`).
+- [x] Every documented constraint is proven at the database level, not just
+      assumed from Java annotations — including a raw-SQL test that
+      bypasses the Java enum layer entirely (`ConstraintsIT`).
+- [x] A stale-version concurrent update is rejected
+      (`OptimisticLockingIT`).
+- [x] A multi-row write rolls back completely on failure, verified from a
+      separate transaction afterward, not just "an exception was thrown"
+      (`TransactionalPersistenceServicesIT`).
+- [ ] Tenant-isolation-at-the-API-level test (tenant A can't read tenant
+      B's integration via a real endpoint) — deferred with the API
+      endpoint itself to Phase 3.
 **Test commands:**
 ```
-./mvnw -q test -Dtest=*ArchitectureTest
-./mvnw -q verify   # runs Testcontainers-backed integration tests
-./mvnw -q flyway:info
+./mvnw -q verify   # runs Testcontainers-backed integration tests, incl. migrations
 ```
 
 ## Phase 3 — Ingestion workflow (Workflow A)
 
-**Depends on:** Phase 2 (tenant/auth, `integrations`).
+**Depends on:** Phase 2 (schema, entities, repositories).
 **Scope:**
+- Carried forward from the original Phase 2 plan (deferred — see Phase 2's
+  note above): `identity`/`security` JWT validation config,
+  `TenantContext` resolution from `tenant_memberships`,
+  `POST`/`GET /api/v1/integrations`, and the ArchUnit module-boundary rule.
 - `ingestion`, `normalization`, `processing`, `messaging`, `storage`
   modules.
 - `POST /api/v1/ingestions` (idempotency-key enforced), presigned S3 upload,
